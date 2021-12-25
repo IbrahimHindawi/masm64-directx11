@@ -946,7 +946,7 @@ An assembly language app is much like screen printing: MOST of the time involved
 
 The pace will pick up in Part IV, where DirectX will be initialized, shut down when the main window is destroyed, and the message loop will only render a blank scene with no vertices.
 
-## Part IV a
+# Part IV a
 
 ## Overview
 
@@ -1151,7 +1151,7 @@ Next…
 
 The next installment, Part IV(b), dives straight into initializing DirectX – starting with the `D3DCreateDeviceAndSwapChain` function call.
 
-## Part IV b
+# Part IV b
 
 ## Overview
 
