@@ -1151,5 +1151,155 @@ Next…
 
 The next installment, Part IV(b), dives straight into initializing DirectX – starting with the `D3DCreateDeviceAndSwapChain` function call.
 
+## section b
 
+## Overview
 
+Several thousand years after posting part IV(a), I finally got up the motivation to create the full DirectX app – small though it may be from a functional standpoint (it spins a triangle).  The main issue for me is that creating the source code for this sample required manual retyping of every single byte of source code involved.  Since this required well over 40 hours of work, motivational resources were limited. 
+
+Most of what’s in my own personal apps is custom formatted for a specific editor I use and will not properly display in any other editor.  (I’m not going to name the editor I use because I found the company/people publishing it to be evil and obnoxious and I don’t care to give them any free publicity.)  Further, if I’m going to publish a full app, I’m going to do it right – which includes going through every byte of source code and making sure everything is accurate.  Moving to all assembly for a DirectX app is a huge step and there is effectively zero support in the world for doing it.  The last thing readers need is hastily scribbled-out source that creates more problems than it solves.  ASM is a taboo subject for most, and a lot of disinformation has to be dispelled to even begin down that path.  The material leading developers there has to be of the best possible quality.
+
+## Compiling the App
+
+Create a new directory for the project and unzip the project’s .zip file there.  There will be two subdirectories: `Triangle`, and `DXSampleMath`.  The latter is covered later in this article, under "The Dreaded Math Library" header.
+
+The file `go.bat` in the `Triangle` subdirectory is provided for compiling the project.  It references ml64.exe and link.exe as residing in their default VS17 C++ directories.  If these are different on your system, you must change the string assignments at the top of the batch file. 
+
+The unaltered contents of `go.bat` are shown below.  Note that opening quotes without closing quotes are used by design.
+```
+@echo off
+
+rem Set this value to the location of rc.exe under the VC directory
+set rc_directory="C:\Program Files (x86)\Windows Kits\10\bin\x86
+
+rem Set this value to the location of ml64.exe under the VC directory
+set ml_directory="C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\bin\x86_amd64
+
+rem Set this value to the location of link.exe under the VC directory
+set link_directory="C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\bin
+
+%rc_directory%\rc.exe" resource.rc
+%ml_directory%\ml64.exe" /c /Cp /Cx /Fm /FR /W2 /Zd /Zf /Zi /Ta DXSample.xasm > errors.txt
+%link_directory%\link.exe" DXSample.obj resource.res /debug:none /opt:ref /opt:noicf /largeaddressaware:no /def:DXSample.def /entry:Startup /machine:x64 /map /out:DXSample.exe /PDB:DXSample.pdb /subsystem:windows,6.0 "C:\Program Files (x86)\Windows Kits\10\Lib\10.0.10586.0\um\x64\kernel32.lib" "C:\Program Files (x86)\Windows Kits\10\Lib\10.0.10586.0\um\x64\user32.lib" "C:\Program Files (x86)\Microsoft DirectX SDK (August 2009)\Lib\x64\d3d11.lib" "C:\Program Files (x86)\Microsoft DirectX SDK (August 2009)\Lib\x64\d3dx11.lib" DXSampleMath.lib
+type errors.txt
+```
+## A Minor Repair
+
+If you don’t use WinDbg for debugging, you can comment out the first call of the `DXSample.asm` file; the call to `FixWinDbg`.  I use this call in every app I write to counter a decade-plus old bug in `WinDbg`, where every time it’s executed, the window layouts shift with each window shrinking every edge by a few pixels.  Windows become smaller and smaller with each new execution until they’re eventually at minimum size.  The `FixWinDbg` function resets the window positions and sizes within `WinDbg` to counter this failure.  Microsoft has been contacted about the issue multiple times.  They have elected not to address it, so developers must if they want it fixed.
+
+**Note: that the** `win_ids` **string in the** `strings.asm` **file is hard coded for** `WinDbg` **version 10.0.17134.12**.  If you want to use `FixWinDbg` and you’re running any other version of it, you must change the version number in this string to match the WinDbg version you’re running.  If this isn’t done, the WinDbg windows won’t be properly identified.
+
+If you’re not modifying the app, you won’t need a debugger unless you want to trace through the code’s execution.
+
+## The App Entry Point
+
+`WinMain` isn't really an app’s entry point.  The actual entry point is declared in the linker command line and can be anything.  This app uses `Startup` as the main function; it serves as the app’s entry point. `Startup` could set up the parameters for, and call, `WinMain` if it were desired to create one, but there is no perceptible benefit for doing so.  The app would only end up calling the required WinAPI functions to retrieve the information that would have been passed as parameters to WinMain.
+
+## Defining and Declaring Structures
+
+The file `structuredefs.asm` holds the definitions for all data structures used by the app.  Structures can be nested, but any structure must be defined before it’s referenced, even within another structure.  Within the `structuredefs.asm` file, data structures are generally defined alphabetically, however when a structure such as `DXGI_SAMPLE_DESC` is referenced by another such as `D3D11_TEXTURE2D_DESC`, the `DXGI_SAMPLE_DESC` structure must be defined before being referenced.  Therefore its definition appears in the file above the definition for `D3D11_TEXTURE2D_DESC`. 
+
+There are several options for declaring an initialized data structure.  The first is probably the most commonly used, but isn’t my favorite because it appears messy and it’s difficult to immediately associate a value with a given field.  **Note that the only case sensitive values in the entire app are in the external definitions file.  External functions must be declared using exactly the case used to export them from their resident libraries**.  The first method for declaring a structure is shown below:
+
+```
+sampleDesc   dxgi_sample_desc   <1, 0>
+```
+The method employed by the app is shown below:
+```
+swapChainDesc    label   dxgi_swap_chain_desc                   ; Declare structure label
+                ;------------------------------------------------
+                 dword   ?                                      ; dxgi_swap_chain_desc.BufferDesc._Width
+                 dword   ?                                      ; dxgi_swap_chain_desc.BufferDesc._Height
+                 dword   60                                     ; dxgi_swap_chain_desc.BufferDesc.RefreshRate.numerator
+                 dword   1                                      ; dxgi_swap_chain_desc.BufferDesc.RefreshRate.denominator
+                 dword   DXGI_FORMAT_R8G8B8A8_UNORM             ; dxgi_swap_chain_desc.BufferDesc.Format
+                 dword   DXGI_MODE_SCANLINE_ORDER_UNSPECIFIED   ; dxgi_swap_chain_desc.BufferDesc.ScanlineOrdering
+                 dword   DXGI_MODE_SCALING_UNSPECIFIED          ; dxgi_swap_chain_desc.BufferDesc.Scaling
+                 dword   1                                      ; dxgi_swap_chain_desc.SampleDesc.Count
+                 dword   0                                      ; dxgi_swap_chain_desc.SampleDesc.Quality
+                 dword   DXGI_USAGE_RENDER_TARGET_OUTPUT        ; dxgi_swap_chain_desc.BufferUsage
+                 qword   1                                      ; dxgi_swap_chain_desc.BufferCount
+                 qword   ?                                      ; dxgi_swap_chain_desc.OutputWindow
+                 dword   1                                      ; dxgi_swap_chain_desc.Windowed
+                 dword   DXGI_SWAP_EFFECT_DISCARD               ; dxgi_swap_chain_desc.SwapEffect
+                 qword   0                                      ; dxgi_swap_chain_desc.Flags
+```
+This method allows easy reference of per-field values in the source code.  The compiled output is unchanged between either of the methods.
+
+## Checkpoint
+
+By now, it should be becoming apparent that assembly offers a lot of flexibility for cleaning up source code and easily locating whatever needs to be found.  The lack of management overhead within the source code alone is extreme when compared with C++, and the developer is able to enjoy a much more direct, hands-on level of control over the compiled output.  Further, the lack of any typecasting, in my view, is the greatest benefit of all.  Any time you try to save the developer from his or her own ineptitude, a language rapidly becomes a monstrous juggernaut of micromanagement.  The “save the developer from idiocy” approach makes it extremely difficult to find the code that actually does useful work, which, in this day and age, is deep in the minority anyway.  There is so much explicit instruction to give to the compiler, via menus as well as source statements, that one might as well simply write the app in assembly and save a whole lot of time.
+
+Better still, data is simply data.  There are no presumptions made about what you’re going to do with it, which eliminates typecasting completely. For example, if you wanted to flip the sign of a floating point value, there’s no need to load that value into a register, apply some SSE instruction, and write it back to memory.  Instead, you can simply toggle bit 7 (with xor byte ptr [location], 80h) of whatever byte holds the most significant bit of the floating point value. 
+
+Say goodbye to the sloppy double underscores, double asterisks, double colons, etc. that make source code look like an explosion in a spaghetti factory.
+
+## The Switch from Switch
+
+In the file callbacks.asm, there is a notable lack of any switch statements (none exists in ASM).  Instead, an infinitely more direct and sensible method is applied for routing the processing of incoming Windows messages: index the incoming message on a lookup table, and jump to the same index on a router table.  The CPU provides the repnz scasq instruction which makes such lookups extremely fast compared to brute-force value-by-value comparisons.  A value placed in the RAX register is repeatedly scanned against RCX qwords at location RDI.  When a match is found, the scan stops. 
+
+Memory locations are frequently used directly as jump targets, the same as the contents of a register can serve that purpose.  In the attached source, the lookup table Main_CB_Lookup (in the file lookups.asm) is paired with Main_CB_Rte (in the file routers.asm).   Entry 0 on the lookup table is processed at the location pointed to by entry 0 on the router table. 
+
+## Returning from a Call
+
+The Main_CB function – the callback function for the main window – contains a workaround for what amounts to the only real issue to be found in ASM: the RET or return statement.  It’s the only location where the compiler becomes “helpful” and takes over what it thinks you mean when it encounters a RET statement: it wants to reset RBP and destroy the stack frame created when the function was entered.  In this app, handlers are used within the framework of the function.  One handler per message is employed.  These are called as a function would be, so they must be returned from.  However the return from these handlers should simply POP the return address off the stack and jump there.  Because of the automatic handling of framing out a function in ASM, every RET statement encountered is viewed as “return from function,” and the function’s stack frame is destroyed when it should not be.
+
+To overcome this, simply declare a byte value of 0C3h directly inline in the source, as you would declare data.  This will execute as a RET statement without messing up the function’s stack frame and all is well.
+
+Note that all of the message handlers are placed after the function’s action RET statement so that they are guaranteed not to execute unless explicitly called.
+
+## WinCall and LocalCall
+
+The LocalCall macro simply generates a CALL instruction.  It exists only to clarify that a call destination is found within the app and is not part of the Windows API.  WinCall, conversely, handles all the particulars of the 64-bit calling convention.  The first four parameters for a call destination should always be present in RCX, RDX, R8, and R9, in that order.  Any parameters beyond the fourth are placed into their appropriate locations on the stack by the WinCall macro.  Constants, direct memory references, and general registers can be used to hold any parameters beyond the fourth.  Since, internally, RAX is used to shuttle these values onto the stack, any value that can be placed into RAX can be passed as a parameter to WinCall after RCX, RDX, R8, and R9 (those registers are used directly).
+
+As a side note, I always avoid using R10 and R11 for parameter passing.  These registers are defined by the 64-bit convention as volatile.  As such, their values on return from a call are never guaranteed and I avoid using them just as a safety measure.
+
+## COM and ASM
+
+A COM interface pointer is actually a pointer to a location in memory.  At that location is a pointer to the vTable for the interface.  The RCX register must contain the interface pointer on all COM calls.  While this can be figured out by studying the C++ header files, it’s an inconvenient truth to have to learn the hard way.  All documented DirectX methods should assume an undocumented parameter this as the first parameter: the interface pointer itself must be present in RCX. 
+
+Within the app, all DirectX calls are made following the logic outlined below:
+
+	1.Move the interface pointer into RCX.
+	2.Move the value pointed to by RCX into RBX.  I.e. mov rbx, [rcx].  This moves the vTable pointer into the RBX register.  Within this app, all COM methods are defined relative to the RBX register.  It was an arbitrary decision; RBX wasn’t really used for much of anything else so it was selected.  All vTables (defined in vTables.asm) reference offsets from RBX, i.e.
+
+```
+ID3D11DeviceContext_DrawIndexed textequ <qword ptr [rbx+96]>
+```
+Using the above example, the call is made to ID3D11DeviceContext_DrawIndexed, not to the local variable D3D11DevCon->DrawIndexed.  The -> won’t be interpreted as ASM does not inherently understand COM.
+
+## The Dreaded Math Library
+
+In a perfect world, I would have custom-coded all of the math library functions used by this app.  I did not.  In this case, I elected to use the included C++ solution DXSampleMath instead.  This is a sample app, designed as an introduction to creating DirectX applications in ASM, and the time available to devote to it was quite limited. 
+
+`DXSampleMath` contains functions that in turn call their sometimes-inline counterparts.  For example, the `DXSampleMath` .DLL module exports `XMMatrixMultiplyProxy`.  That function has a single statement: it passes its parameters to `XMMatrixMultiply`.  The wrappers were necessary because many of the math library functions are generated as inline code within the wrapper function.
+
+The entire .DLL project in VS2017 C++ is contained in the `DXSampleMath` directory immediately under the directory you created for the .zip file.
+
+## Conclusion
+
+This article is only a quick overview of how the app is put together.  If you intend to expand on this app, or to write your own, you won’t be able to escape the need for perusing the attendant source code.
+
+The one suggestion I will place above all others is this: don’t be an apologist for using ASM.  Your goal is to serve the end user, not to make your peers happy, gain their approval, or avoid making them feel small.  Make the best use of ASM according to your own quirks and your own preferences.  You are not doing things “properly” by bending over backward trying to make your ASM code resemble a high level language as closely as possible.  You are under no obligation to follow the rules that apply to high level languages in corporate work environments, and attempting to do so will rapidly destroy everything you moved to ASM to achieve.  What’s “proper” over there is not proper over here.  What’s correct there isn’t correct here.  Do what works for you.  Unleash your abilities.  Take off the shackles.  If you like using globals, use them; if you don’t use them, be aware of the cost of your choice: for every 20 bytes saved by declaring a data structure or a string dynamically, you may use 60+ bytes of extra code to manage it.  That is not intelligent programming.  Know what you’re generating.  No other language makes it as easy as ASM to keep close tabs on what is actually executing.
+
+Most of your data should be initialized as hard-coded static variables.  The amount of code used to manage dynamically allocated structures almost always results in a net loss of memory over what static values would require.  When you hard code static values, initialization is already done at compile time, with even more code bytes and execution time being saved by not having to initialize the data at runtime.  Worse, all accesses to local variables must be indirect – the CPU must execute an outrageously slow subtraction instruction for every single access.  MOV RAX, [RBP-38h], for example, requires RBP-38h to calculate on the fly.  It takes more extra bytes of code to encode that instruction over a fixed memory location, in addition to the huge slowdown in executing it.  This slowdown will apply to every single dynamically allocated and/or local variable in your app, every single time it’s accessed.  The app attached to this article uses one single local variable: holder, which is required for the WinCall macro in every function that uses it.  All other data is static and all but a few values are initialized at compile time.
+
+The swapChainDesc structure declaration in the structures.asm file demonstrates this process.  The only variables not hard coded are the ones that are unknown until runtime: the main window's handle, and its window width/height. 
+
+I've been developing in assembly language full time and almost exclusively since 1984.  In that time, I've learned one thing that stands head and shoulders above all other lessons: you always stand to learn something valuable from everybody using the language – especially beginners, who are seeking, who have open minds, who have not yet been indoctrinated into the bureaucracy that oversees the development community.  I can guarantee you that every college student dabbling into ASM because an instructor made them do it could teach me something I didn’t know about using the language.  That is unlikely to ever change.
+
+Your biggest speed improvement, by far, will come from reworking the math library.  It is a monster, but hardly an impressive one.  Internally it reflects a level of shoddy disorganization seldom seen in the software world.  It uses memory freely and recklessly when CPU registers are widely available; that switch alone could exponentially speed up execution.  As with all high level languages, the DirectX math collection has a love of calling, calling, calling, many levels deep.  Each call, each return, costs execution time that could be improving gameplay (or whatever your DirectX task is). It is not uncommon to see C++ utilize ten or fifteen CPU instructions to manage calling a function that executes two or three.  These types of cases can easily be overridden by an ASM developer, simply placing the two or three instructions inline in a function rather than calling them in a function.
+
+Since your most potent weapon against performance hinderance is the math library, it stands to reason that reworking it will be your biggest challenge.  It will not be easy.  But each function reworked will only need to be done once, and you will have the benefit of chipping away at the task one function at a time. 
+
+The real sticking point in reworking the math library is in deciding where to place the cutoff along the path of SSE evolution.  Today’s AVX-512 instructions are geared heavily toward vector math, providing huge performance benefits.  But Gary Gamer in Gametown, Georgia may have an older system that doesn’t support AVX-512.  What then?  You have to figure it out.  I would create a distinct library for every cutoff point along the evolutionary chain, and load the appropriate library at app startup time based on detected hardware.  Then my app isn’t being drug down by redundantly checking for the CPU version on every single call to the math library.  It would be an enormous undertaking, but that’s my way – do what works for you.
+
+With this article and its attendant app, you have a very lightweight starting point.  If you’re serious about blazing new trails, about producing 3D products nobody thought possible on standard hardware, you’ll have to get used to reigning in impatience and sometimes embarking on long, tedious information and development tangents.  If you’re using ASM, the world is not your friend.  There are precious few resources for helping you along; most of your forward progress will have to be made on your own.  And the payoff for all that effort is that you’ll be the only kid on your block with a Lamborghini while everybody else is driving a Ford Focus.
+
+Push the envelope, get back to basics, and take control of your creations.  Show the world what you’re capable of inventing.  Most people; most companies, won’t.  They’ll continue acting as mere brokers, hiring 491 outsourced companies, who in turn hire 491 outsourced companies each, avoiding work and preferring to brokers deals instead.  They will avoid work as their main goal in life – it’s money for nothing.  That’s their prerogative; one that makes it quite easy to leave them far behind in the dust with your own creations.  If their approach was your orientation, you probably wouldn’t be reading this article at all.  It’s likely that for you, the envelope must be pushed or you won’t be happy.  You want more than you have.  You are the type that will evolve the industry – not the brokers.  Apply what’s given here, learn it, work with it, expand on it, and you’ll move right out of the pack and onto the bleeding edge.  Go forth and multiply … divide … add … subtract … create!
+
+With the material presented here as a launch pad, you have a wide open portal to absolutely unheard of new vistas in 3D gaming.  All you have to do is walk through it.  And don’t be afraid to work hard.
+
+What will you create?  That’s your call.  Why don’t you show us? 
+
+Game on!
