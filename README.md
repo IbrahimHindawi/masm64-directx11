@@ -584,3 +584,365 @@ In my apps, I typically precede all strings with a size qword so that I can simp
 
 You won’t always want to use this approach.  If you have a limited size buffer and want to be sure you don’t scan beyond it, then you’ll have to set `RCX` to the buffer size.  However doing this will force you to calculate the string size by either subtracting the ending count in `RCX` from the starting count, or by subtracting the ending pointer (plus one) from the starting pointer after the scan.
 
+## Call Me Right Back, K?
+
+Regarding the window callback, a lookup table contains all the messages handled by the callback. This table always begins with a qword that holds the entry count. The offset into the table is then calculated, and the same offset into a corresponding router table holds the location of the code for handling that message.
+
+```
+mov                 rax, rdx                                ; Set the value to scan (incoming message)
+lea                 rdi, message_table                      ; Point RSI @ the table start (entry count qword)
+mov                 rcx, [ rdi ]                            ; Load the entry count
+scasq                                                       ; Skip over the entry count qword
+mov                 rsi, rdi                                ; Save pointer @ table start
+repnz               scasq                                   ; Scan until match found or counter reaches 0
+jnz                 call_default                            ; No match; use DefWindowProc
+sub                 rdi, rsi                                ; Get the offset from the first entry of the table (not including entry count qword)
+lea                 rax, message_router                     ; Point RAX at the base of the router table
+call                qword ptr [ rax + rdi - 8 ]             ; Call the handler
+```
+For this app, only four messages will be initially handled: `WM_ERASEBKGND`, `WM_PAINT`, `WM_CLOSE`, and `WM_DESTROY`.
+
+The handler for `WM_ERASEBKGND` does nothing but return `TRUE (1)` in `RAX`.  Returning `TRUE` for this message tells Windows that all handling for the message is complete and nothing more needs to be done.  (Relative to all Windows messages a callback might process, the value that your app must return is `FALSE (0)` far more often than not, but it’s never safe to assume – always check the documentation for each message handled; some require a very different and specific return value depending on how you handled the message.  This is especially true in dialog boxes, in particular with `NM_` notifications sent through `WM_NOTIFY`.) 
+
+There are cases where an application engaging in complex drawing operations may want to know when the background is being erased, but even these odd men out may no longer exist.  The `WM_ERASEBKGND` message itself is an ancient artefact of a bygone era.  In the earliest days of Windows, just drawing a stock window with a frame could seriously tax the graphics adapter.  As such, a slew of tricks and compensations had to be employed to speed up the process when and where that could be done.  One of these innovations was the idea of identifying the exact portion of a window’s client area that actually needed to be redrawn.  This “update region” often does not include the entire client area, and any time a few CPU cycles could be saved, it was worth doing. 
+
+So the concept of “update areas” or “update regions” (a region is a collection of rectangles) was created.  Within the client area, a region was declared as “invalid,” meaning it had to redrawn.  In modern times, the code required to process update regions is arguably slower and bulkier than simply redrawing the entire client area off screen then drawing it in one shot onto the window itself.  DirectX employs this “double buffering” technique extensively to avoid flicker, which comes from “erase then redraw” on-screen.  Still, even in Windows 10, the remnants of the old window painting system remain; the handler for the `WM_PAINT` message must explicitly “validate” the update area.  If it doesn’t, `WM_PAINT` messages will repeat forever, flowing into a window’s callback function fast and furious, dragging down the performance of the entire application.  This sample code’s `WM_PAINT` handler uses the Win32 `ValidateRect` function as its only task, since DirectX takes over all drawing in the window client area.  
+
+## A Volatile Situation
+
+Note that per MSDN, the following registers are considered nonvolatile – any function called will preserve their values across its entire execution:
+
+`R12`, `R13`, `R14`, `R15`; `RDI`, `RSI`, `RBX`, `RBP`, `RSP` 
+
+These must be saved then restored if they’re altered in the window callback (or any other) function.  For this application, all of the nonvolatile registers are saved regardless of the message being handled - saving is done before the incoming message is even looked at.  You may or may not want to alter this behavior in your own application’s internal functions, but when you call any Windows function, you have to be aware that the contents of volatile registers can never be relied on to persist across the call.  One function or another may indeed leave a volatile register unchanged on its return, but specs are specs and that behavior could easily change at any time, especially given the any-time-is-a-good-time update policy for Windows 10.
+
+The complete function for the window callback is shown below, noting that the assembler will handle saving and restoring `RBP` and `RSP` for each function declared:
+
+```
+mainCallback       proc                                                        ;
+
+                   local               holder:qword, hwnd:qword, message:qword, wParam:qword, lParam:qword
+
+                   ; Save nonvolatile registers
+
+                   push                rbx                                     ;
+                   push                rsi                                     ;
+                   push                rdi                                     ;
+                   push                r12                                     ;
+                   push                r13                                     ;
+                   push                r14                                     ;
+                   push                r15                                     ;
+
+                   ; Save the incoming parameters
+
+                   mov                 hwnd, rcx                               ;
+                   mov                 message, rdx                            ;
+                   mov                 wParam, r8                              ;
+                   mov                 lParam, r9                              ;
+
+                   ; Look up the incoming message
+
+                   mov                 rax, rdx                                ; Set the value to scan (incoming message)
+                   lea                 rdi, message_table                      ; Point RSI @ the table start (entry count qword)
+                   mov                 rcx, [ rdi ]                            ; Load the entry count
+                   scasq                                                       ; Skip over the entry count qword
+                   mov                 rsi, rdi                                ; Save pointer @ table start
+                   repnz               scasq                                   ; Scan until match found or counter reaches 0
+                   jnz                 call_default                            ; No match; use DefWindowProc
+                   sub                 rdi, rsi                                ; Get the offset from the first entry of the table (not including entry count qword)
+                   lea                 rax, message_router                     ; Point RAX at the base of the router table
+                   call                qword ptr [ rax + rdi - 8 ]             ; Call the handler
+                   jmp                 callback_done                           ; Skip default handler
+
+call_default:                                                                  ; The only changed register holding incoming parameters is RCX so only reset that
+                   mov                 rcx, hWnd                               ; Set hWnd
+                   WinCall             DefWindowProc, 4, rcx, rdx, r8, r9      ; Call the default handler
+
+callback_done:     pop                 r15                                     ;
+                   pop                 r14                                     ;
+                   pop                 r13                                     ;
+                   pop                 r12                                     ;
+                   pop                 rdi                                     ;
+                   pop                 rsi                                     ;
+                   pop                 rbx                                     ;
+
+                   ret                                                         ; Return to caller
+
+mainCallback       ends                                                        ; End procedure declaration
+```
+
+When popping registers, they must be popped in the exact reverse order from how they were saved (pushed).  Intel architecture uses a LIFO stack model – last in, first out.  Each push instruction (assuming a `qword` is pushed) stores that `qword` in memory at the location pointed to by RSP; RSP is then backed up (moves toward 0) by 8 bytes.  The “lowest” address on the stack is the “top” of the stack.  Entry into this callback will place items on the stack in the order they’re pushed – the lowest (closest to 0) address holds `R15`; the highest holds RBX (referencing the code above). 
+
+One of the most common bugs in an assembly language application is forgetting to pop an item that was pushed onto the stack.  You’re not in Kansas anymore, Toto, so you have to do these things manually.  Extra power carries extra responsibility.  When this occurs, the return from the function (the ret instruction) will itself pop the `qword` off the top of the stack and jump to whatever address it holds.  So inadvertently leaving even one `qword` on the stack will completely demolish the return from the function and typically send the app careening down to Mother Earth in flames.   
+
+The code above represents the entirety of the callback function (minus the individual message handlers) for the main window.  Each handler can be thought of as a “subroutine” in the original BASIC language, for those who can remember that far back.  The handler code for each message is actually part of the `mainCallback` function – it lives inside the function itself.  Since all the handlers are coded after the ret instruction, they will never execute unless explicitly called.
+
+Within the handlers, the only oddity is the use of the ret instruction to return from the handler into the main code of the function.  From the assembler’s viewpoint, you can’t do this.  The assembler sees ret and it assumes you’re returning from the function itself.  As such, it will insert code that attempts to restore `RBP` and `RSP`, doing so at a location where you most definitely don’t want that happening.  This is where I employ a semi-unorthodox method: I directly encode the ret statement as:
+
+```
+byte     0C3h     ; Return to caller
+```
+
+Alternatively, you could use a textequ statement to change that to something more palatable, like:
+
+```
+HandlerReturn     textequ     <byte 0C3h> ;
+```
+
+Text equates evaporate beyond the source code level; the assembler will simply replace all occurrences of `HandlerReturn` with `byte 0C3h`.  You just won’t have to look at it in your source code.
+
+At the CPU level, the call instruction doesn’t do anything with `RBP` or `RSP` directly.  The instruction itself  simply `push`es the address of the next instruction after call, then jumps to wherever you’re calling. Correspondingly, `ret` doesn’t do anything except `pop` whatever value is waiting at the top of the stack and jump to that value, as an address.  (The code to restore `RBP`, reset `RSP` \[from its setup for local variable usage], and return is generated by the assembler.)  The CPU has no concept of what a function is; the assembler gives all of that meaning completely separately from the CPU.  So hard-coding 0C3h as the `ret` statement prevents the compiler from trying to helpfully crash your program by resetting `RBP` and `RSP` in preparation for a return from the function.  “But wait, I’m still on the potty!”  Encoding the byte directly in the code stream is just another benefit of the flexibility afforded by the very direct assembly language data model (which is “no model at all”).
+
+If you don’t like this method, you’ll have to encode a separate function for each message you actually process.  Then you can simply call as required, but you’ll have to reload the parameters coming into the `mainCallback` function before doing so (to the extent that each handler needs the information).  This, however, carries the extra overhead of setting up and tearing down a function (saving registers, etc.) as well as placing `mainCallback`'s incoming parameters back into the required registers for passing to each message handling function.  It all adds up to a lot of extra overhead just for the sake of ritual. It's hardly worth it.  Avoiding this extra overhead is the reason for using “in-function handlers” for message processing.  Each handler has direct access to the `mainCallback` local variables (which hold the incoming parameters) because, from the compiler's viewpoint, each handler is still part of `mainCallback`.
+
+Accessing local variables – in particular, the incoming parameters to `mainCallback` – is no problem at all.  Within each handler, you’re still in the “space” of the `mainCallback` function, therefore all its local variables are fully intact and accessible.
+
+The lookup table message_table is shown below:
+
+```
+message_table            qword       (message_table_end – message_table_start ) / 8
+message_table_start      qword       WM_ERASEBKGND
+                         qword       WM_PAINT
+                         qword       WM_CLOSE
+                         qword       WM_DESTROY
+message_table_end        label       byte ; Any size declaration will work; byte is used as the smallest choice
+```
+The router list for the callback function is:
+
+```
+message_router     qword     main_wm_erasebkgnd
+                   qword     main_wm_paint
+                   qword     main_wm_close
+                   qword     main_wm_destroy
+```
+
+The `WM_ERASEBKGND` handler is shown below:
+
+```
+align               qword                                   ;
+main_wm_erasebkgnd label               near                                    ;
+
+                   mov                 rax, 1                                  ; Set TRUE return
+                   byte                0C3h                                    ; Return to caller
+```
+
+`WM_PAINT`: with DirectX handling all of the drawing for the main client area, the only thing the `WM_PAINT` handler needs to do is to validate the invalid client area. 
+
+First, ensure the ValidateRect function is declared in the externals.asm file:
+
+```
+extrn            _imp__ValidateRect:qword
+ValidateRect     textequ     <_imp__ValidateRect>
+```
+
+The `WM_PAINT` handler consists of a single call to `ValidateRect`:
+```
+align               qword                                   ;
+main_wm_paint      label               near                                    ;
+
+                   xor                 rdx, rdx                                ; Zero LPRC for entire update area
+                   mov                 rcx, hwnd                               ; Set window handle
+                   WinCall             ValidateRect, 2, rcx, rdx               ; Validate the invalid area
+
+                   xor                 rax, rax                                ; Set FALSE return
+                   byte                0C3h                                    ; Return to caller
+```
+
+Failure to validate the update area will cause a torrent of `WM_PAINT` messages to flow into the window’s callback function; Windows will continue sending them forever, thinking there’s an update area still needing to be redrawn.
+
+The `WM_CLOSE` handler destroys the window.  The DestroyWindow function needs to be declared in the externals.asm file, or wherever you’re keeping your externals:
+
+```
+extrn             __imp_DestroyWindow:qword
+DestroyWindow     textequ     <__imp_DestroyWindow>
+```
+
+The `WM_CLOSE` handler follows:
+```
+align               qword                                   ;
+main_wm_close      label               near                                    ;
+
+                   mov                 rcx, hwnd                               ; Set the window handle
+                   WinCall             DestroyWindow, 1, rcx                   ; Destroy the main window
+
+                   ; Here it's assumed that the call succeeded.  If it failed,
+                   ; RAX will be 0 and GetLastError will need a call to figure
+                   ; out what's blocking the window from being destroyed.
+
+                   xor                 rax, rax                                ; DestroyWindow leaves RAX at TRUE if it succeeds so it needs to be zeroed here
+                   byte                0C3h                                    ; Return to caller
+```
+
+The handler for `WM_DESTROY` is a notification, sent after the window has been removed from the screen.  This is where the DirectX closeouts occur.  The local `ShutdownDirectX` function will be covered in Part IV, which discusses DirectX initialization and shutdown:
+
+```
+align               qword                                   ;
+main_wm_destroy    label               near                                    ;
+
+                 ; The DirectX shutdown function is commented out below; it
+                 ; has not been covered yet as of part III of the series.  It
+                 ; will be uncommented and coded in the source for part IV.
+
+                 ; call                ShutdownDirectX                         ; Calling a local function does not require the WinCall macro
+
+                   xor                 rax, rax                                ; Return 0 from this message
+                   byte                0C3h                                    ; Return to caller
+```
+
+The callback function is closed out with a single line:
+
+```
+main_callback endp
+```
+
+The only task remaining, to make the code presented so far a complete application, is the actual startup code.  `WinMain` is not used, so the startup code moves directly into creating the main window, then enters the message loop.  The entire block of entry code is shown below:
+
+```
+;*******************************************************************************
+;
+; DEMO - Stage 1 of DirectX assembly app: create main window
+;
+; Chris Malcheski 07/10/2017
+
+                   include             constants.asm                           ;
+                   include             externals.asm                           ;
+                   include             macros.asm                              ;
+                   include             structuredefs.asm                       ;
+                   include             wincons.asm                             ;
+
+                   .data                                                       ;
+
+                   include             lookups.asm                             ;
+                   include             riid.asm                                ;
+                   include             routers.asm                             ;
+                   include             strings.asm                             ;
+                   include             structures.asm                          ;
+                   include             variables.asm                           ;
+
+                   .code                                                       ;
+
+Startup            proc                                                        ; Declare the startup function; this is declared as /entry in the linker command line
+
+                   local               holder:qword                            ; Required for the WinCall macro
+
+                   xor                 rcx, rcx                                ; The first parameter (NULL) always goes into RCX
+                   WinCall             GetModuleHandle, 1, rcx                 ; 1 parameter is passed to this function
+                   mov                 hInstance, rax                          ; RAX always holds the return value when calling Win32 functions
+
+                   WinCall             GetCommandLine, 0                       ; No parameters on this call
+                   mov                 r8, rax                                 ; Save the command line string pointer
+
+                   lea                 rcx, startup_info                       ; Set lpStartupInfo
+                   WinCall             GetStartupInfo, 1, rcx                  ; Get the startup info
+                   xor                 r9, r9                                  ; Zero all bits of RAX
+                   mov                 r9w, startup_info.wShowWindow           ; Get the incoming nCmdShow
+                   xor                 rdx, rdx                                ; Zero RDX for hPrevInst
+                   mov                 rcx, hInstance                          ; Set hInstance
+
+; RCX, RDX, R8, and R9 are now set exactly as they would be on entry to the WinMain function.  WinMain is not
+; used, so the code after this point proceeds exactly as it would inside WinMain.
+
+; Load the cursor image
+
+                   xor                 r11, r11                                ; Set cyDesired; uses default if zero: XOR R11 with itself zeroes the register
+                   xor                 r9, r9                                  ; Set cxDesired; uses default if zero: XOR R9 with itself zeroes the register
+                   mov                 r8, image_cursor                        ; Set uType
+                   mov                 rdx, ocr_normal                         ; Set lpszName
+                   xor                 rcx, rcx                                ; Set hInstance
+                   WinCall         LoadImage, 6, rcx, rdx, r8, r9, r11, lr_cur ; Load the standard cursor
+                   mov                 wcl.hCursor, rax                        ; Set wcl.hCursor
+
+; Load the large icon
+
+                   mov                 r11, 32                                 ; Set cyDesited
+                   mov                 r9, 32                                  ; Set cxDesired
+                   mov                 r8, image_icon                          ; Set uType
+                   lea                 rdx, LargeIconResource                  ; Set lpszName
+                   mov                 rcx, hInstance                          ; Set hInstance
+                   WinCall         LoadImage, 6, rcx, rdx, r8, r9, r11, lr_cur ; Load the large icon
+                   mov                 wcl.hIcon, rax                          ; Set wcl.hIcon
+
+; Load the small icon
+
+                   mov                 r11, 32                                 ; Set cyDesited
+                   mov                 r9, 32                                  ; Set cxDesired
+                   mov                 r8, image_icon                          ; Set uType
+                   lea                 rdx, SmallIconResource                  ; Set lpszName
+                   mov                 rcx, hInstance                          ; Set hInstance
+                   WinCall         LoadImage, 6, rcx, rdx, r8, r9, r11, lr_cur ; Load the large icon
+                   mov                 wcl.hIconSm, rax                        ; Set wcl.hIcon
+
+; Register the window class
+
+                   lea                 rcx, wcl                                ; Set lpWndClass
+                   winCall             RegisterClassEx, 1, rcx                 ; Register the window class
+
+; Create the main window
+
+                   xor                 r15, r15                                ; Set hWndParent
+                   mov                 r14, 450                                ; Set nHeight
+                   mov                 r13, 800                                ; Set nWidth
+                   mov                 r12, 100                                ; Set y
+                   mov                 r11, 100                                ; Set x
+                   mov                 r9, mw_style                            ; Set dwStyle
+                   lea                 r8, mainName                            ; Set lpWindowName
+                   lea                 rdx, mainClass                          ; Set lpClassName
+                   xor                 rcx, rcx                                ; Set dwExStyle
+                   WinCall             CreateWindowEx, 12, rcx, rdx, r8, r9, r11, r12, r13, r14, r15, 0, hInstance, 0
+                   mov                 main_handle, rax                        ; Save the main window handle
+
+; Ensure main window displayed and updated
+
+                   mov                 rdx, sw_show                            ; Set nCmdShow
+                   mov                 rcx, rax                                ; Set hWnd
+                   WinCall             ShowWindow, 2, rcx, rdx                 ; Display the window
+
+                   mov                 rcx, main_handle                        ; Set hWnd
+                   WinCall             UpdateWindow, 1, rcx                    ; Ensure window updated
+
+; Execute the message loop
+
+wait_msg:          xor                 r9, r9                                  ; Set wMsgFilterMax
+                   xor                 r8, r8                                  ; Set wMsgFilterMin
+                   xor                 rdx, rdx                                ; Set hWnd
+                   lea                 rcx, mmsg                               ; Set lpMessage
+                   WinCall             PeekMessage, 4, rcx, rdx, r8, r9, pm_remove
+
+                   test                rax, rax                                ; Anything waiting?
+                   jnz                 proc_msg                                ; Yes -- process the message
+
+                 ; call                RenderScene                             ; <--- Placeholder; will uncomment and implement in Part IV article
+
+proc_msg:          lea                 rcx, mmsg                               ; Set lpMessage
+                   WinCall             TranslateMessage, 1, rcx                ; Translate the message
+
+                   lea                 rcx, mmsg                               ; Set lpMessage
+                   WinCall             DispatchMessage, 1, rcx                 ; Dispatch the message
+
+                   jmp                 wait_msg                                ; Reloop for next message
+
+breakout:          xor                 rax, rax                                ; Zero final return – or use the return from WinMain
+
+                   ret                                                         ; Return to caller
+
+Startup            endp                                                        ; End of startup procedure
+
+                   include             callbacks.asm                           ;
+
+                   end                                                         ; Declare end of module
+```
+
+As a skeleton program, the demo application is now complete.  
+
+As stated in the README.TXT file (in the accompanying .ZIP file), many improvements will be made to the source code for this specific article, so don't spend too much time modifying this code.  Not yet.  This code was intended to relate concepts and act as a tutorial; as such, its focus was not on efficiency.  This will change in Part IV, which will cover initializing DirectX.  
+
+In addition, several handlers will be added to the callback function, to create a custom window frame.  
+
+Note that DirectX goes absolutely bonkers with constant declarations and nested structures.  (DirectX 11 is used, because DirectX 12 only runs on Windows 10.)  Because of the sheer volume of typing to move those declarations and definitions over to assembly, they will no longer be detailed in subsequent articles after this one.  It's presumed that by now, you get the point and understand the basics of declaring structures, constants, etc. in assembly - with the exception of nesting structures, which will be covered in the next article.
+
+An assembly language app is much like screen printing: MOST of the time involved is in the initial setup - getting your externals declared, your structures defined, etc.  All of this is one-time work and can be used for an infinite number of applications without having to be repeated.  As this series continues, the accompanying source code will do much of that work for you.  Feel free to copy and paste the nasty declarations and definitions as desired so you don't have to research and type them all manually.
+
+The pace will pick up in Part IV, where DirectX will be initialized, shut down when the main window is destroyed, and the message loop will only render a blank scene with no vertices.
+
+
+
