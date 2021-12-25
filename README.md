@@ -5,7 +5,8 @@
 - [Part I](https://github.com/IbrahimHindawi/masm64dx#part-i)
 - [Part II](https://github.com/IbrahimHindawi/masm64dx#part-ii)
 - [Part III](https://github.com/IbrahimHindawi/masm64dx#part-iii)
-- [Part IV](https://github.com/IbrahimHindawi/masm64dx#part-iv)
+- [Part IVa](https://github.com/IbrahimHindawi/masm64dx#part-iv-a)
+- [Part IVb](https://github.com/IbrahimHindawi/masm64dx#part-iv-b)
 
 # Part I
 
