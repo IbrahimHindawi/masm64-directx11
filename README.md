@@ -5,6 +5,7 @@
 - [Part I](https://github.com/IbrahimHindawi/masm64dx#part-i)
 - [Part II](https://github.com/IbrahimHindawi/masm64dx#part-ii)
 - [Part III](https://github.com/IbrahimHindawi/masm64dx#part-iii)
+- [Part IV](https://github.com/IbrahimHindawi/masm64dx#part-iv)
 
 # Part I
 
@@ -943,6 +944,212 @@ Note that DirectX goes absolutely bonkers with constant declarations and nested 
 An assembly language app is much like screen printing: MOST of the time involved is in the initial setup - getting your externals declared, your structures defined, etc.  All of this is one-time work and can be used for an infinite number of applications without having to be repeated.  As this series continues, the accompanying source code will do much of that work for you.  Feel free to copy and paste the nasty declarations and definitions as desired so you don't have to research and type them all manually.
 
 The pace will pick up in Part IV, where DirectX will be initialized, shut down when the main window is destroyed, and the message loop will only render a blank scene with no vertices.
+
+# Part IV
+
+## section a
+## Overview
+
+This article will clean up the inefficiencies of previous articles in this series. The Part IV application (which will be attached, for download, to the next installment, Part IV(b)) will initialize DirectX, implement the app’s message loop, and render a blank scene to the screen. It’s presented in parts, because there’s a lot to cover. As with anything, the more you work with it, the more it becomes second nature. The most difficulty lies in making the initial switch from high level language thinking to mentally working in the arena of assembly language.
+
+## First Things First: Calling Out
+
+The first order of business is to clean up the outrageously inefficient `WinCall` macro presented in the first 3 articles of this series. With (hopefully) sufficient groundwork laid for achieving a basic understanding of the assembly language/Windows universe, the new and improved `WinCall` macro can now be presented:
+
+```
+WinCall       macro               call_dest:req, parms:vararg ;
+
+              local               jump_1, lpointer, numArgs   ;
+
+              numArgs             = 0                         ;
+
+              for                 parm, <parms>               ;
+                numArgs           = numArgs + 1               ;
+              endm                                            ;
+
+              if numArgs lt 4                                 ;
+                numArgs = 4                                   ;
+              endif                                           ;
+
+              mov                 holder, rsp                 ;
+              sub                 rsp, numArgs * 8            ;
+              and                 rsp, 0FFFFFFFFFFFFFFF0h     ;
+
+              lPointer            = 0                         ;
+              for                 parm, <parms>               ;
+                if                lPointer gt 24              ;
+                  mov             rax, parm                   ;
+                  mov             [ rsp + lPointer ], rax     ;
+                elseif            lPointer eq 0               ;
+                  mov             rcx, fname                  ;
+                elseif            lPointer eq 8               ;
+                  mov             rdx, fname                  ;
+                elseif            lPointer eq 16              ;
+                  mov             r8, fname                   ;
+                elseif            lPointer eq 24              ;
+                  mov             r9, fname                   ;
+                endif                                         ;
+                lPointer          = lPointer + 8              ;
+              endm                                            ;
+
+              call                call_dest                   ;
+
+              mov                 rsp, holder                 ;
+
+              endm                                            ;
+```
+
+Remember that the `holder` `qword` variable is a local variable that must be declared in every function using the `WinCall` macro. The compile will fail if this is not done.
+
+The modified `WinCall` macro is far more efficient than its for-education-only predecessor. There’s no longer any requirement to pass a parameter count, and most of the work is done during compile, not at runtime.
+
+The macro assembler includes an operator to return the number of parameters passed to the macro, but at least in the `ML64.EXE` build I was using, it didn’t want to cooperate. So the count had to be calculated in a manual loop, but that work is still done at compile time.
+
+In the first line of the macro, `:req` means “required.” The parameter must be passed – it’s the target function to call. The parameter `parms` is a variable argument count (`:vararg`) and passing zero parameters is just as acceptable as passing a thousand: whatever the function requires. (If the function you're calling actually requires a thousand parameters, check the documentation as something may be off in your understanding of it.)
+
+Let the macro place the values into the required registers, as well as onto the stack. `RAX` will be loaded with each passed parameter; if required, the contents of `RAX` will then be placed into the appropriate location on the stack. So passing the macro, as a parameter, any reference that will legally load into a general-purpose register is acceptable. You can use variables, offsets, or anything else that can be placed directly into a register. The function calls in the Part IV sample code will demonstrate the full range of what is legal.
+
+Since `RSP` is decreasing for the call to the target function, clearing the low 4 bits ensures it’s 16-byte aligned – this is a requirement for placing float values, accessed by `XMM` registers, onto the stack. And there will be plenty of that in the course of the sample app. `RSP` is reset after the target function returns, so how much `RSP` is adjusted (within reason) is effectively irrelevant. If the low four bits of `RSP` are already clear, they’re unchanged. Otherwise, they’re cleared. So any kind of testing for those bits being set is a waste of time and there’s no reason to do it.
+
+## DirectX Structures
+
+If every DirectX structure used by the sample code were listed in this article, you’d have a jillion pages to wade through. The structures used by the attached source code are all defined within that source code – in the file `structuredefs.asm`.
+
+As mentioned previously, DirectX loves to nest structures, and it’s not shy about doing it. When it comes to data structures, the main difference between assembly and other languages is that unnamed, nested unions and structures are not allowed. Everything needs a name. Here and there, this will impact reference to deeply-nested structure fields so it must be kept in mind.
+
+## Prepackaging Values
+
+The concept has been covered before, but it’s being reiterated here: especially with performance-intensive DirectX apps, assigning constants or otherwise known values at runtime is a big no-no. It may make the code look pretty in other languages, but in assembly language, it’s exceedingly simple to initialize structure fields to their startup values as hardcoded data within their declarations. Assigning the values any other way, at run time, is going to require the value to be present within the source code bytes anyway, in addition to all the bytes of code needed to move it around. Worse, the destination for those moves – the structure fields themselves, within memory – are already sitting as reserved space, where storing 0 is no different from storing the initial value required.
+
+The general rule of thumb is that if a field’s value cannot be determined until the app executes, then it must be assigned at runtime. Otherwise, preset the values. This will be demonstrated in part IV(b).
+
+## Assembly Language and COM
+
+DirectX is COM (Component Object Model) based. The basic operation of COM has a table of pointers to functions called methods; the table is called a `virtual method table` or `vTable`. An interface pointer points to another pointer which points to the vTable, as shown in the image below:
+
+\[The referenced image displays fine in the CodeProject editor, however in preview mode, it displays as a broken link, and when the final article is viewed, you don't even get that - it's just blank space. Nobody knows why. So the URL for the image is http://www.starjourneygames.com/com_vtable.jpg.]
+
+## The Almighty RIID
+
+The riid parameter is used often in COM dealings. Riid is short for `reference interface identifier`; it’s essentially an alias for `universally unique identifier`, or `UUID`, or `Globally Unique Identifier`, or `GUID`.
+
+Riid: every COM interface has one. It’s the value that uniquely identifies the interface as a whole unit. When you’re using any COM subsystem in assembly language, you have to track down the exact value for that interface’s riid. Sometimes they’re found by globally searching all the header files in the Windows SDK Include directory for `IID_<interface name>`. Sometimes they’re declared externally, and you have to actually use the value in Visual Studio to find out what it is. Sometimes you can find the needed value online. Whatever the case, when the riid value is needed, it has to be found somewhere, then declared in your data segment.
+
+From the viewpoint of the CPU, riid’s are stored as a byte string. For whatever conformity can be had in declaring them as data, the format I typically use is dword, word, word, then 8 bytes. In the MSDN header files, riid’s are most often listed in this format:
+
+```
+db6f6ddb-ac77-4e88-8253-819df9bbf140
+```
+
+Converting this to the required assembly language declaration, the following results:
+
+```
+IID_ID3D11Device     	dword      0DB6F6DDBh
+			            word       0AC77h
+			            word       04E88h
+			            byte       082h
+			            byte       053h
+			            byte       081h
+			            byte       09Dh
+			            byte       0F9h
+			            byte       0BBh
+			            byte       0F1h
+			            byte       040h
+```
+
+Every now and then, DirectX header files will randomly store an riid in the following format:
+
+0xDB, 0x6D, 0x6F, 0xDB, 0x77, 0xAC, 0x88, 0x4E, 0x82, 0x53, 0x81, 0x9D, 0xF9, 0xBB, 0xF1, 0x40
+
+When this is the case, adjustments must be made for Intel’s little-endian memory format – unless you’re going to declare the entire riid as a string of bytes, in which case you can use the data you're working from as-is. If you’re going to use the `dword`/`word`/`word`/`bytes` format, then the first four bytes must be reversed to declare them as a `dword`:
+
+```
+0xDB, 0x6D, 0x6F, 0xDB is declared as a dword of value 0DB6F6DDBh.
+```
+The next two words must be reversed, with 0x77, 0xAC and 0x88, 0x4E being declared as:
+
+```
+word            0AC77h
+word            04E88h
+```
+Riid values comprise one of those cases where you just can’t escape the pain of using them in assembly language apps. My personal policy is that once I look up an riid value, I keep it – completely formatted as a data declaration – in a special file devoted only to holding riid values. That way I have to look up each value I use once and only once.
+
+The riid values used in the attached source code are all defined within those source files.
+
+## Calling Methods
+
+Text equates, or textequ declarations, are the closest you can come to the “native” format for referencing COM methods in assembly. You can’t use the double colon (::) with text equates; I use an underscore instead. The important thing is that the methods can be called by name this way.
+
+Each method is pointed to by a given location within its interface’s vTable. In 64-bit Windows, each entry in the vTable is, of course, 8 bytes long, holding a 64-bit pointer to the method code.
+
+Building the list of text equates is another (and the final) piece of potentially hard work in setting up to use COM from assembly language. For example, the `IUnknown` interface, which begins nearly every COM vTable, is defined as follows:
+
+```
+vTable [ 0 ] ->  IUnknown::QueryInterface
+vTable [ 8 ] ->  IUnknown::AddRef
+vTable [ 16 ] -> IUnknown::Release
+```
+In the attached source code, `IUnknown` would be defined as:
+```
+IUnknown_QueryInterface           textequ     <qword ptr [rbx]>
+IUnknown_AddRef                   textequ     <qword ptr [rbx+8]>
+IUnknown_Release                  textequ     <qword ptr [rbx+16]>
+```
+Remembering always that the RBX register holds the vTable pointer, a sample call to the COM method `IUnknown::QueryInterface` would look like the following:
+
+```
+lea     r8,  INewInterface
+lea     rdx, IID_INewInterface
+mov     rcx, IUnknown
+mov     rbx, [rcx]
+WinCall IUnknown_QueryInterface, rcx, rdx, r8
+```
+In the above sample, `INewInterface` is an imaginary interface pointer. `QueryInterface` will set it with a pointer to the requested interface, specified by `IID_INewInterface`. **For every COM method called, RCX must hold the interface pointer**. This is not explicitly documented anywhere, since all other languages utilizing COM are designed to have the compiler insert that code and never require the developer to worry about it. In assembly language, it’s not the case: **RCX must hold the interface pointer**. `RCX`, as the interface pointer, points to a pointer to the vTable. In the above sample, RBX is loaded with the pointer to the vTable. Subsequently, the text equate for  `IUnknown_QueryInterface` is <qword ptr [rbx]>, so the first method in the vTable will be called.
+
+If you’re working with COM in assembly language, it won’t take long before all this becomes second nature. In the attached source code, RCX (as it must) always holds the interface pointer, and RBX is used app-wide to point to the vTable for all methods being called.
+
+If you need to build your own list of text equates, **you must do so in vTable order**. Within its online documentation, MSDN (almost) always lists methods for an interface in alphabetical order. This makes it much easier to find the documentation on a given method, but for the purposes of building text equates to represent access to a vTable, it must be remembered that the methods in the actual vTable will almost never be alphabetical. Once again, the header files must be consulted for the proper vTable order. Intellisense, within Visual Studio, will list the methods alphabetically as well. That won’t work either for building your text equates.
+
+Typically, within the header files, searching for `IID_<interface name>` within the file will land you on something like the following:
+```
+EXTERN_C const IID IID_ID3D11Device;
+
+#if defined(__cplusplus) && !defined(CINTERFACE)
+    MIDL_INTERFACE("db6f6ddb-ac77-4e88-8253-819df9bbf140")
+    ID3D11Device : public IUnknown
+    {
+    public:
+        virtual HRESULT STDMETHODCALLTYPE CreateBuffer(
+. . .
+```
+Following this will be the entire vTable – or the extension of it. In this case, note the line
+
+```
+ID3D11Device : public IUnknown
+```
+
+This means that the entire `IUnknown` interface begins the vTable. Following these declarations can easily send you into a very long search, looking for interface A which is begun with interface B, etc. Many interfaces, for example, begin with IDispatch, which in turn begins with IUnknown.
+
+To avoid this kind of searching, when you find content like what’s shown above, move down to the end of the vTable declarations. There you’ll nearly always find the “C-Style Interface” declarations, which forego all the nesting and simply declare every method in the interface. This is what I build my lists off of.
+
+```
+#else      /* C style interface */
+
+    typedef struct ID3D11DeviceVtbl
+    {
+        BEGIN_INTERFACE
+        HRESULT ( STDMETHODCALLTYPE *QueryInterface )(
+. . .
+```
+## COM: Class Dismissed
+
+Overall, COM is a behemoth. What’s been discussed in this article is only the basic information required to get DirectX up and running. As with everything Microsoft does, other COM interfaces may change the rules, bend the rules, or break the rules. So what works for DirectX is not universal, if you end up delving into other arenas such as `IWebBrowser`. In all my work with DirectX, I have not seen any such violations; the use of COM has been 100% consistent with the information presented in this article.
+
+For as far as this series of articles goes, you won’t need to do any of this research to build the required data, declarations, and structures. It’ll all be present in the attached source code.
+
+Next…
+
+The next installment, Part IV(b), dives straight into initializing DirectX – starting with the `D3DCreateDeviceAndSwapChain` function call.
 
 
 
