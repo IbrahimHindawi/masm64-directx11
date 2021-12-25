@@ -275,6 +275,311 @@ Nothing more needs to be done to access DirectX, WinAPI, etc. functions.  Declar
 
 Part III will finally dive right into declaring the main window class and creating the main window.  This will include coding the main window’s callback function.  It’s basic stuff for those with any kind of Windows development experience, but there’s plenty to talk about regarding moving it all over to assembly language.
 
+# Part III
 
+Apologies for the misformatted code snippets that appear sporadically in this article.  I've been over these, deleted then retyped them, redone the formatting, all to no avail.  As near as I can tell, this appears to be a bug in the CodeProject HTML - if not, I'm just not seeing what the issue is.  The line breaks are not present when I submit the article.  They show up afterward; horizontal scrolling in the snippets turns off and the line breaks appear out of nowhere.
 
+The source code for this article can be downloaded from http://www.starjourneygames.com/demo part 3.zip
+
+## Beginning the Main Module
+
+Unlike 32-bit assembly, relevant directives (such as .686P) are few and far between.  I have not yet had occasion to use one.  With this being the case, the main module begins with the following:
+
+```
+include     constants.asm                           ;
+include     externals.asm                           ;
+include     macros.asm                              ;
+include     structuredefs.asm                       ;
+include     wincons.asm                             ;
+
+.data                                               ;
+
+include     lookups.asm                             ;
+include     riid.asm                                ;
+include     routers.asm                             ;
+include     strings.asm                             ;
+include     structures.asm                          ;
+include     variables.asm                           ;
+
+.code                                               ;
+```
+
+With this, an adjustment is made to the main source file’s beginning so that utility files, such as typedefs, structure declarations, and macros, come before the `.data` directive.  The files that contain no code or data (those appearing before the `.data` directive) define macros, structures, etc. for the compiler.  They generate no actual output, so these can be placed before the `.data` directive, where the compiler doesn't yet have any idea where to place generated output and thus would reject actual code or data.  
+
+The linker will set the entry point (discussed next) at the start of the `.code` section, so the ordering of the code and data sections is irrelevant.  This app places data first.  
+
+Each of the include files listed above is self-explanatory as to its content.  The accompanying source code contains the complete files.
+
+## The Windows Entry Point
+
+An application’s `WinMain` function isn’t really its entry point.  When an assembly language application declares its code segment with
+
+```
+.code
+```
+the first executable instruction after `.code` becomes the app’s true entry point.  `WinMain` is purely superfluous and is not actually required at all.  I don’t use it; in an assembly language application it provides no benefit over creating the app without it.  While one could argue that the parameters passed to `WinMain` might be critical to initializing an application, that argument is zero sum when it comes to an assembly app because you, the developer, need to set up that call to `WinMain` if you’re going to use it.  If you have to retrieve all the information typically sent to `WinMain` before calling it, why use the function at all? 
+
+That said, there is certainly no measurable harm in including `WinMain` if you want to do it.  You may have sound reasons for wanting to include it, so add it if you feel it’s necessary.  Just be aware that your own startup code – which begins execution immediately after the `.code` statement – must manually set up the `WinMain` call. 
+
+To call `WinMain`, the nCmdShow parameter is retrieved from the `wShowWindow` field of the `STARTUPINFO` structure, which is passed to `GetStartupInfo`.
+
+`GetCommandLine` returns the lpCmdLine parameter; pass that value as-is to `WinMain`.
+
+`hPrevInstance` is always null, per MSDN documentation for `WinMain`.
+
+`hInstance` is retrieved by calling `GetModuleHandle(0)`. 
+
+Below is the complete initialization source for calling `WinMain`.  **Note that even if you're not going to include `WinMain`, you may still need some or all of the parameters that are passed to it.  The discussion that follows covers retrieval of this information, with or without implementation of `WinMain`.**
+
+Declare the `STARTUPINFO` structure in structuredefs.asm (or wherever you prefer to put it):
+
+```
+STARTUPINFO         struct
+cb                  qword     sizeof ( STARTUPINFO )         
+lpReserved          qword     ?         
+lpDesktop           qword     ?         
+lpTitle             qword     ?         
+dwX                 dword     ?         
+dwY                 dword     ?         
+dwXSize             dword     ?         
+dwYSize             dword     ?         
+dwXCountChars       dword     ?         
+dwYCountChars       dword     ?         
+dwFillAttribute     dword     ?         
+dwFlags             dword     ?         
+wShowWindow         word      ?         
+cbReserved2         word      3 dup ( ? )
+lpReserved2         qword     ?         
+hStdInput           qword     ?         
+hStdOutput          qword     ?         
+hStdError           qword     ?         
+STARTUPINFO         ends
+```
+
+In the externals.asm file, declare the functions to be called for initialization:
+
+```
+extrn              __imp_GetCommandLineA:qword
+GetCommandLine     textequ     <__imp_GetCommandLineA>
+
+extrn              __imp_GetModuleHandleA:qword
+GetModuleHandle    textequ     <__imp_GetModuleHandleA>
+
+extrn              __imp_GetStartupInfoA:qword
+GetStartupInfo     textequ     <__imp_GetStartupInfoA>
+```
+If you’re using Unicode, you should declare `GetCommandLineW`, `GetModuleHandleW`, and `GetStartupInfoW` instead of the “A” functions shown above.
+
+With the required functions now a known quantity to the compiler, variables need to be declared for holding the parameters to pass to `WinMain` – these are placed in the file variables.asm:
+```
+hInstance          qword     ?
+lpCmdLine          qword     ?
+```
+In the file structures.asm, declare the `STARTUPINFO` structure:
+```
+startup_info STARTUPINFO <> ; cbSize is already set in the structure declaration
+```
+The entry point to the application can then be coded as follows (`Startup` can be renamed to anything you like - if you're going to call it `WinMain`, be aware that it doesn't inherently conform to the documentation for `WinMain`):
+```
+.code
+
+align          qword
+Startup        proc                          ; Declare the startup function; this is declared as /entry in the linker command line
+
+local          holder:qword                  ; Required for the WinCall macro
+
+xor            rcx, rcx                      ; The first parameter (NULL) always goes into RCX
+WinCall        GetModuleHandle, 1, rcx       ; 1 parameter is passed to this function
+mov            hInstance, rax                ; RAX always holds the return value when calling Win32 functions
+
+WinCall        GetCommandLine, 0             ; No parameters on this call
+mov            lpCmdLine, rax                ; Save the command line string pointer
+
+lea            rcx, startup_info             ; Set lpStartupInfo
+WinCall        GetStartupInfo, 1, rcx        ; Get the startup info
+xor            rax, rax                      ; Zero all bits of RAX
+mov            ax, startup_info.wShowWindow  ; Get the incoming nCmdShow
+
+; Since this is the last "setup" call, there is no reason to place nCmdShow into a memory variable then
+; pull it right back out again to pass in a register.  Register-to-register moves are exponentially
+; faster than memory access, so all that needs to be done is to move RAX into R9 for the call to WinMain.
+
+mov            r9, rax                       ; Set nCmdShow
+mov            r8, lpCmdLine                 ; Set lpCmdLine
+xor            rdx, rdx                      ; Zero RDX for hPrevInst
+mov            rcx, hInstance                ; Set hInstance
+call           WinMain                       ; Execute call to WinMain
+
+xor            rax, rax                      ; Zero final return – or use the return from WinMain
+ret                                          ; Return to caller
+
+Startup        endp                          ; End of startup procedure
+```
+**NOTE:** If you’re strictly adhering to 64-bit calling convention, then the startup code’s call to `WinMain` should use the `WinCall` macro and not a direct `call` instruction. I don’t do this in my apps, and I won’t be doing it in this sample code. Stack usage means memory usage, and my first rule of programming is to avoid memory hits. When accessing the shadow area on the stack for RCX, RDX, R8, and R9 during a call, indirect addressing must be used, which further slows the app. As mentioned earlier, the in trepidation over violating the 64-bit calling convention may be strong. However it will still be unfounded as far as necessity is concerned. I simply see no benefit to using that convention within my app’s local functions – it requires a relatively large amount of setup code, which, across an entire app, takes too much time to execute; it costs memory, and it adds to development time.  Any function declared within my app (including this one) does not use the 64-bit calling convention directly – parameters are still passed in RCX, RDX, R8, and R9 for the first four, but space for shadowing them is not reserved on the stack. For additional parameters, I simply use other registers. The stack is not used for any parameter data.  Some will call this reckless, but “reckless” would only be relative to the standard being compared to.
+
+Further, in my own apps, calls to local functions use a single pointer (in RCX) pointing to a structure that holds all the parameters to be passed to that function.  Doing things any other way, the first thing most local functions would need to do would be to save the incoming parameters in local variables for later access; from the CPU’s perspective this is little different from using the 64-bit convention as it was created.  I’m not doing that here; individual registers carry the parameters into local functions as they’re called.  The reason for this is that from a tutorial standpoint it’s much more confusing to work with a pointer to an array of parameters for every function, many of which will be pointers to other things.  When is enough, enough?  So it is again reiterated: modify the code as required to suit your own preferences.
+
+## The Almighty RAX
+
+Born in the earliest recorded incarnations of Intel CPU design, the RAX register (building on EAX, which built on AX) always holds the return value from a function.  I have not seen an exception to this rule in any WinAPI function or method, no matter what it is.  Even drivers use it across the board.  All functions within any application I write do the same, so it will apply here: no matter what you call, when you call it, or where you call it from, RAX holds the return value. 
+
+## Registering the Window Class
+
+To create the app’s main window, its window class has to be registered.  This necessitates declaring the `WNDCLASSEX` structure, which in this sample code will be done in a separate file called structuredefs.asm.  As always, you’re free to move things around and rename files as you see fit.  However, at this point an adjustment is being made to the main source file’s beginning so that utility files, such as typedefs, structure declarations, and macros, come before the .data directive.
+
+The following is placed in the structuredefs.asm file:
+```
+WNDCLASSEX        struct
+cbSize            dword     ?
+dwStyle           dword     ?                   
+lpfnCallback      qword     ?                    
+cbClsExtra        dword     ?
+cbWndExtra        dword     ?
+hInst             qword     ?
+hIcon             qword     ?
+hCursor           qword     ?
+hbrBackground     qword     ?
+lpszMenuName      qword     ?
+lpszClassName     qword     ?
+hIconSm           qword     ?
+WNDCLASSEX        ends
+```
+Nesting structures will be covered when the subject of DirectX structures is delved into – when there are actual examples to work with.
+
+Mind your D’s and Q’s – be careful when copying code to accurately type `dword` and `qword` declarations.  One typo here could (and probably would) crash the app.
+
+Strictly for the sake of keeping the source readable, I use a single constant to represent long chains of flags that are logically OR’d together.  In this app, `WNDCLASSEX.dwStyle` will equate to:
+```
+classStyle equ CS_VREDRAW OR CS_HREDRAW OR CS_DBLCLKS OR CS_OWNDC OR CS_PARENTDC
+```
+(The CS_xxx constants come from the Windows header files; they're declared in wincons.asm in the source code attached to this article.)
+
+The `OR` directive is reserved by the assembler; it functions the same as the | character in most other languages.  I add the above line to my constants.asm file; you can place it (if you use it at all) wherever you like.
+
+With this done, the actual `WNDCLASSEX` structure, which will be used to create the main window, can now be declared.  In this sample code, it’s done in the structures.asm file.  This is where all fixed data that can be is placed directly into the structure fields.  There’s no reason to move data around any more than is required, so on-the-fly initialization where it isn’t required makes no sense at all.  With `WNDCLASSEX`, the `hInst`, `hIcon`, `hbrBackground`, and `hIconSm` fields won’t be known until runtime, so they’re initialized at zero. 
+
+There are several options when declaring the actual data for the `WNDCLASSEX` structure (which will be named wcl).  The most traditional form can be used:
+
+```
+wcl WNDCLASSEX <sizeof (WNDCLASSEX), [. . .]>
+```
+Using the format above, all fields must be accounted for if any are declared (however this will vary depending on the actual assembler being used). 
+
+The way data is declared in assembly language allows for some flexibility in declaring structures, and at least for me, this comes in handy.  Declaring `wcl` as a label of type `WNDCLASSEX` allows me to list each field separately, while still having the debugger recognize the structure as `WNDCLASSEX`.  In the source code, I prefer having access to the individual fields per-line; it keeps the source cleaner and makes things easier to read and update.  Of course, doing things this way also opens the door to errors; if the field-by-field declaration doesn’t exactly match the `WNDCLASSEX` definition, there are going to be problems.  So using this method may not be for everybody.  If you don’t like it, just use the first form shown above.
+
+```
+wcl     label     WNDCLASSEX
+        dword     sizeof ( WNDCLASSEX )  ; cbSize
+        dword     classStyle             ; dwStyle
+        qword     mainCallback           ; lpfnCallback
+        dword     0                      ; cbClsExtra
+        dword     0                      ; cbWndExtra
+        qword     ?                      ; hInst
+        qword     ?                      ; hIcon
+        qword     ?                      ; hCursor
+        qword     ?                      ; hbrBackground
+        qword     mainName               ; lpszMenuName
+        qword     mainClass              ; lpszClassName
+        qword     ?                      ; hIconSm
+```
+
+The function `mainCallback` is the callback function for the window class; it will be discussed next.  The variable `mainClass` is the class name string, which I define in the strings.asm file, along with the main window name (window text), as:
+
+```
+mainClass     byte     ‘DemoMainClass’, 0  ; Main window class name
+mainName      byte     ‘Demo Window’, 0    ; Main window title bar text
+```
+
+Note that the terminating 0 **must** be declared at the end of the string.  The assembler doesn’t automatically place it. 
+
+From this point forward, assume that any constant used in Win32 calls must be declared somewhere in your source.  I put my Win32 constants in the file wincons.asm, and constants that are unique to my app in the file constants.asm. 
+
+To fill in `hCursor`, `LoadImage` is called as follows.  In constants.asm, declare:
+
+```
+lr_cur equ LR_SHARED OR LR_VGACOLOR OR LR_DEFAULTSIZE
+```
+
+This is an optional step. If you prefer to use the values directly, simply replace `lr_cur` below with `LR_SHARED` OR `LR_VGACOLOR` OR `LR_DEFAULTSIZE`.
+
+```
+xor                 r11, r11                                ; Set cyDesired; uses default if zero: XOR R11 with itself zeroes the register
+     xor                 r9, r9                                  ; Set cxDesired; uses default if zero: XOR R9 with itself zeroes the register
+     mov                 r8, image_cursor                        ; Set uType
+     mov                 rdx, ocr_normal                         ; Set lpszName
+     xor                 rcx, rcx                                ; Set hInstance to 0 for a global Windows cursor
+     WinCall         LoadImage, 6, rcx, rdx, r8, r9, r11, lr_cur ; Load the standard cursor
+     mov                 wcl.hCursor, rax                        ; Set wcl.hCursor
+```
+**NOTE:** many data structures requiring runtime initialization will be of `dword`, or smaller, size.  You must pay close attention to this, as assembly will not stop you from writing a `qword` into a `dword` location.  It’ll simply overwrite the next four bytes after the `dword` when that isn’t what you want to do.  If `wcl.hCursor` were a `dword`, then the 32-bit EAX, not the 64-bit RAX, would be written there.  If it were a 2-byte word, then the 16-bit AX would be written, and if it were a single 8-bit byte, then AL would be written.
+
+There are countless references to Intel architecture registers online.  Use them as needed.  The hardware designers, as a predominant rule, are very consistent in their naming of things, so it won’t take long to memorize how the registers work.  Just keep using them; the information will stick.
+
+`hInstance` is assigned when the app starts up; anybody with any appreciable WinAPI experience knows that it’s used a lot.  It’ll be required when initializing DirectX, among other things.  It isn't used when loading the standard cursor because it's a stock object provided by Windows.  If hInstance is specified, Windows will search the calling application for the resource.  It won't find it, and the call will fail. 
+
+In the call above, the `WinCall` macro is invoked.  `LoadImage` takes six parameters, so six parameters are specified.  64-bit calling convention requires that RCX, RDX, R8, and R9 hold the first four parameters, meaning these cannot be altered – other registers cannot be used in their place.  R11 is arbitrary; any open register except RAX or R10 (which the WinCall macro uses internally) can be used to store the `cyDesired` parameter because it’s not one of the first four parameters.  The `WinCall` macro will properly set up the stack for the call to `LoadImage`, caring nothing for which registers are used to carry values on entry into the macro. **Just remember `R10` is used by the macro itself as a taxi service so don't use it, or `RAX`, to give your parameters a sendoff into `WinCall`.**
+
+For setting the hIcon and `hIconSm` fields, `LoadImage` is used the same as shown above; just change the cxDesired and cyDesired parameters to the appropriate dimensions of the icon; uType is set to `image_icon`, and of course `lpszName` is set to the name of the resource as it’s declared in your resource file.  `hInstance` must be set to the application's `hInstance`, since these resources are part of the application - they are not Windows-global.  The resource file is compiled by RC.EXE so nothing changes from its format in any C++ application (or any other language that handles resource files the same as C++).  The resource file lines for the icons are shown below:
+
+```
+LARGE_ICON   ICON   DISCARDABLE   "LargeIcon.ico"
+SMALL_ICON   ICON   DISCARDABLE   "SmallIcon.ico"
+```
+In the assembly source, declare the names of the resources (I place these in the strings.asm file):
+
+```
+LargeIconResource     byte     ‘LARGE_ICON’, 0 ;
+SmallIconResource     byte     ‘SMALL_ICON’, 0 ;
+```
+Pointers to the variables `LargeIconResource` and `SmallIconResource` are passed in turn to each of the two `LoadImage` calls that load the icons.  The results are placed into `wcl.hIcon` and `wcl.hIconSm` respectively.  These are qword fields so `RAX`, on return from `LoadImage`,  is assigned to each.  To actually load the pointers to the strings, use the assembly `lea` instruction.  This is “load effective address;” it was designed to perform on-the-fly calculation of memory address, and it will be used to its full potential later in the app.  For now, it simply loads the pointer with no calculation:
+```
+lea rdx, LargeIconResource ;
+```
+The reason this is necessary is that ML64.EXE eliminated the `offset` directive that used to be a part of Microsoft's assembly language.  Had they not retired it, the line could simply be encoded as “mov rdx, offset LargeIconResource.”  I have no idea why they did it; it’s another step backward in the eternal march toward abstraction de-evolution.
+
+With all the above handled, the window class can now be declared:
+
+```
+lea     rcx, wcl                    ; Set lpWndClass
+winCall RegisterWindowClass, 1, rcx ; Register the window class
+```
+The return value is not used by this app.
+
+Registering the window class finally allows creation of the window that will serve as the DirectX render target.  Win32 is Win32 (64 bits or otherwise) so logically the window creation process continues the same as it would in a C++ application. 
+
+The complete startup code is in the attached source for this article.
+
+## Your Window to the Future
+
+This section will focus primarily on the callback function for the main window.  The main difference between this app and the average C++ application is that here, the switch statement will not be used.  I have always disliked that statement, finding it clunky, primitive, and quite inefficient (given that I look at everything from the viewpoint of what is actually executing on the CPU). 
+
+In place of switch, the CPU’s group of scan instructions is used.  These are CPU-level instructions that scan a given array of bytes (, `word`s, `dword`s, `qword`s) in memory until a match is found (or not).  The value to scan for is always contained in RAX for qwords, EAX for dwords, AX for words and AL for bytes.  RCX holds the number of qwords, etc. to scan, and RDI points to the location in memory to begin scanning.
+
+One of the very convenient uses for the scan instructions is sizing a string.  The following code performs this task:
+
+```
+mov rdi, <location to scan>    ; Set the location to begin scanning
+mov rcx, -1                    ; Set the max unsigned value for the # of bytes to scan
+xor al, al                     ; Zero AL as the value to scan for
+repnz scasb                    ; Stop scanning when a match is encountered or the RCX counter reaches zero
+not rcx                        ; Apply a logical NOT to the negative RCX count
+dec rcx                        ; Adjust for overshot (the actual match of 0 is counted and needs to be undone)
+```
+
+Whatever is encountered in memory that stops the scan (if `repnz` is used, for “repeat while not zero \[repeat while the CPU’s zero flag is clear\]”), RDI will point at the next `byte`, `word`, `dword`, or `qword` after that value. In the sample code above, when the scan completes, `RDI` will point at the byte immediately after the string’s terminating zero. For Unicode strings, the code would look like this:
+
+```
+mov rdi, <location to scan>   ; Set the location to begin scanning
+mov rcx, -1                   ; Set the max unsigned value for the # of bytes to scan
+xor ax, ax                    ; Wide strings use a 16-bit word as a terminator
+repnz scasw                   ; Scan words, not bytes
+not rcx                       ; Apply a logical NOT to the negative RCX count
+dec rcx                       ; Adjust for overshot
+```
+
+`RCX` then holds the length of the string.  However, all good things come with a down side; if you forget to add the terminating 0 after a string (whether that string is wide or ANSI), the wrong size will be returned as the scan will continue until either `RCX` reaches 0 (that’s potentially a whole lot of bytes to scan), or the next 0 value is encountered somewhere in memory after the scan start position.  Still, in such a situation, forgetting the terminating 0 is not going to end well regardless of the approach used to sizing the string.
+
+In my apps, I typically precede all strings with a size qword so that I can simply lodsq that size qword into `RAX`, leaving `RSI` pointing at the string start.  (All the lods? Instructions move data into `RAX`, `EAX`, `AX`, or `AL`.)  If a string is static and isn’t going to change (i.e. the window class name), there is no point in sizing it at all at runtime, let alone multiple times, when the correct size can be set during compile.
+
+You won’t always want to use this approach.  If you have a limited size buffer and want to be sure you don’t scan beyond it, then you’ll have to set `RCX` to the buffer size.  However doing this will force you to calculate the string size by either subtracting the ending count in `RCX` from the starting count, or by subtracting the ending pointer (plus one) from the starting pointer after the scan.
 
