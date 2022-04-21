@@ -1,4 +1,4 @@
-# MASM64 and DirectX
+# MASM64 and DirectX Tutorial
 ## DirectX and Pure Assembly Language: Doing What Can't be Done
 ## Based on CMalcheski's tutorial up on [CodeProject](https://www.codeproject.com/Articles/1190423/DirectX-and-Pure-Assembly-Language-Doing-What-Cant)
 
